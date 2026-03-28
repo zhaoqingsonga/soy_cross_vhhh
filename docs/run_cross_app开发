@@ -1,0 +1,79 @@
+**目标与范围**
+- 统一入口运行杂交组合 Shiny 应用，完成四步配置流程
+- 支持按特征筛选亲本与冲突检测（已配对高亮）
+- 与现有模块集成：mod_cross.R（生成计划）、mod_analysis.R（分析/冲突检测）
+
+**页面流程（四步向导）**
+- Step A 母本选择页
+  - 显示 parents 的全部字段（id、name、traits/description/features/remarks…），支持列筛选（filter="top"）
+  - 多选母本；右侧显示已选数量与基本统计
+  - 点击“确认母本”进入下一步
+- Step B 父本选择页
+  - 同母本页，显示全部字段与列筛选
+  - 冲突检测：高亮“已与任一选中母本配过组”的父本（浅黄色行背景），支持开关“只显示可配父本”
+  - 点击“确认父本”进入下一步
+- Step C 组合矩阵页
+  - 展示 M×N 的二维矩阵：行=母本，列=父本
+  - 已存在组合（正交，反交均要显示）显示灰色，内容显示的是组合的名字；可配置组合显示绿色；点击绿色可以切换为白色（不配置）
+  - 绿色单元格不显示内容；右侧显示“待生成数量/已存在数量”
+  - 点击“确认生成”进入下一步
+- Step D 执行与摘要页
+  - 输入批次名、选择是否生成反交、生成的组合数，不写则是；预览最终将写入的组合清单
+  - 执行写库后显示摘要统计，并提供导出生成日志，所用的亲本列表，所生成的组合列表（正交、反交）。
+
+**数据流与接口**
+- parents() 读取 active=1 的所有列 → A/B 选择 → 计算候选 expand.grid → 调用 check_existing_crosses 批量判重 → C 矩阵交互选取 → create_cross_plan / create_cross_plan_n 写库 → D 摘要
+- 冲突检测：find_unused_partners(m_name, role="female") 返回未配父本集合；多母本时取未配集合交集，补集即冲突集合
+
+**特征筛选设计**
+- 支持 traits/description/features/remarks 等列的文本筛选
+- 规范 traits 存储：以分号或逗号分隔的标签（如“高蛋白;抗病;早熟”）
+- 增强筛选模式：
+  - 包含任一标签（OR）
+  - 必须包含全部标签（AND）
+  - 排除标签（NOT）
+- 可选：chips 交互（多标签点选），提升可用性
+
+**组合生成策略**
+- sequential：按母本 ID×父本 ID 排序切片
+- balanced：在候选上循环分配，使每个母本/父本尽量均衡出现
+- 命名规则：正交使用“female_id-male_id”或模板“{prefix}-{female}-{male}-F0”；反交将 F0 替换为 RF0 或加前缀 R
+
+**矩阵交互规格**
+- 单元格状态：灰色=已存在；绿色=可配置；白色=忽略
+- 支持批量操作：按行/列全选/全不选；清空选择；应用命名模板到选中单元格
+- 可选快捷键：空格切换状态，Enter 编辑 name
+
+**错误处理与健壮性**
+- 缺库/缺表：入口检查 data/db/soy_cross.db 与 parents/crosses 表；缺失时给出引导
+- 选择为空：A/B 任一步无选择时阻止进入下一页并提示
+- 自交过滤：生成候选时自动排除 female_id==male_id
+- 写库事务：dbBegin/dbCommit/dbRollback；逐条插入失败时汇总错误并回滚
+
+**性能与可用性**
+- DT 分页与列筛选；仅加载 active=1 的亲本
+- 判重使用临时表 JOIN：check_existing_crosses 写 temp_candidates 提升批量查询效率
+- 交互提示：showNotification + withProgress 全程反馈
+
+**测试与验收标准**
+- 单元：
+  - create_cross_plan_n 能精确插入 N 条正交；include_reciprocal 生效
+  - find_unused_partners 在“female/male”角色下返回正确集合
+  - 判重逻辑：已有组合不重复插入
+- 集成：
+  - A/B 列筛选与多选可用；冲突高亮正确
+  - C 矩阵灰/绿/白状态正确，命名模板应用正确
+  - D 摘要计数与数据库实际一致
+- 验收：四步流程在 apps/ 与项目根目录启动均可运行
+
+**重构建议与任务拆分**
+- 模块拆分：将 cross_config_ui/server 抽出到 R/mod_cross_config.R，apps/run_cross_app.R 仅负责入口与 source
+- 增加预览 DT：在 D 页展示最终写库清单（含正交/反交标记）
+- traits 规范：在数据导入流程中统一 traits 标签分隔与大小写
+
+**里程碑**
+- M1 架构搭建：入口健壮、模块拆分、A/B 页跑通
+- M2 冲突与筛选：traits 过滤、冲突高亮、开关“只显示可配父本”
+- M3 矩阵与生成：二维矩阵交互、批量操作、写库摘要与导出
+- M4 测试与优化：单元/集成测试、性能与稳定性打磨
+
