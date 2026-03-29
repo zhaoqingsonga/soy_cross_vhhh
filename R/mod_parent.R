@@ -59,6 +59,13 @@ parent_admin_server <- function(id, db_path = NULL) {
     }
     db_path <- normalizePath(db_path, winslash = "/", mustWork = FALSE)
     pending_delete_id <- reactiveVal(NULL)
+    pending_edit_row <- reactiveVal(NULL)
+    col_input_id <- function(col) {
+      paste0("edit_", paste0(sprintf("%02x", as.integer(charToRaw(enc2utf8(col)))), collapse = ""))
+    }
+    sql_quote_ident <- function(x) {
+      paste0('"', gsub('"', '""', x, fixed = TRUE), '"')
+    }
     
     # 尝试加载 utils_io.R - 从项目根目录加载
     # 首先尝试从当前工作目录加载
@@ -325,21 +332,24 @@ parent_admin_server <- function(id, db_path = NULL) {
         showNotification("请先选择一行", type = "warning")
         return(NULL)
       }
+      pending_edit_row(row)
       output$edit_fields <- renderUI({
         con <- dbConnect(RSQLite::SQLite(), db_path)
         on.exit(dbDisconnect(con), add = TRUE)
         schema <- dbGetQuery(con, "PRAGMA table_info(parents)")
+        row <- pending_edit_row()
+        if (is.null(row)) return(NULL)
         ns <- session$ns
         items <- lapply(seq_len(nrow(schema)), function(i) {
           col <- schema$name[i]
           val <- if (col %in% names(row)) row[[col]] else ""
           type <- tolower(schema$type[i])
           if (col == "active") {
-            checkboxInput(ns(paste0("edit_", col)), "启用", isTRUE(as.integer(val) == 1))
+            checkboxInput(ns(col_input_id(col)), "启用", isTRUE(as.integer(val) == 1))
           } else if (grepl("int|real|num", type)) {
-            numericInput(ns(paste0("edit_", col)), col, suppressWarnings(as.numeric(val)))
+            numericInput(ns(col_input_id(col)), col, suppressWarnings(as.numeric(val)))
           } else {
-            textInput(ns(paste0("edit_", col)), col, as.character(val))
+            textInput(ns(col_input_id(col)), col, as.character(val))
           }
         })
         do.call(tagList, items)
@@ -355,21 +365,23 @@ parent_admin_server <- function(id, db_path = NULL) {
       ))
     })
     observeEvent(input$confirm_edit, {
-      removeModal()
+      orig_row <- pending_edit_row()
+      if (is.null(orig_row)) {
+        showNotification("未选择行", type = "error")
+        return(NULL)
+      }
       con <- dbConnect(RSQLite::SQLite(), db_path)
       on.exit(dbDisconnect(con), add = TRUE)
       fields <- dbListFields(con, "parents")
       now <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
       schema <- dbGetQuery(con, "PRAGMA table_info(parents)")
       cols <- schema$name
-      orig_row <- get_selected_row()
-      if (is.null(orig_row)) {
-        showNotification("未选择行", type = "error")
-        return(NULL)
-      }
+      # 先读取 modal 中的输入值（必须在 removeModal() 之前）
       vals <- lapply(cols, function(col) {
-        input[[paste0("edit_", col)]]
+        v <- input[[col_input_id(col)]]
+        if (is.null(v) && col %in% names(orig_row)) orig_row[[col]] else v
       })
+      vals <- lapply(vals, function(v) if (is.null(v)) NA else v)
       names(vals) <- cols
       if ("active" %in% cols) {
         vals[["active"]] <- if (isTRUE(vals[["active"]])) 1L else 0L
@@ -406,12 +418,24 @@ parent_admin_server <- function(id, db_path = NULL) {
         }
       }
       upd_cols <- intersect(cols, fields)
-      set_clause <- paste(paste0(upd_cols, " = ?"), collapse = ", ")
-      sql <- paste0("UPDATE parents SET ", set_clause, " WHERE id = ?")
-      params <- c(unname(as.list(vals[upd_cols])), orig_row$id)
-      dbExecute(con, sql, params = unname(params))
+      set_clause <- paste(paste0(vapply(upd_cols, sql_quote_ident, character(1)), " = ?"), collapse = ", ")
+      sql <- paste0("UPDATE ", sql_quote_ident("parents"), " SET ", set_clause, " WHERE ", sql_quote_ident("id"), " = ?")
+      params <- c(unname(as.list(vals[upd_cols])), list(orig_row$id))
+      updated <- tryCatch({
+        dbExecute(con, sql, params = unname(params))
+        TRUE
+      }, error = function(e) {
+        showNotification(paste0("保存失败：", e$message), type = "error")
+        log_write("edit", paste("id=", orig_row$id, "error=", e$message), "error")
+        FALSE
+      })
+      if (!isTRUE(updated)) {
+        return(NULL)
+      }
+      removeModal()
       log_write("edit", paste("id=", orig_row$id))
       refresh_trigger(refresh_trigger() + 1)
+      pending_edit_row(NULL)
       showNotification("已修改", type = "message")
     })
     observeEvent(input$btn_enable, {
